@@ -10,6 +10,34 @@ const expressLogger = expressPino({ logger });
 
 const app = express();
 
+// Begin of Prometheus metrics
+const promClient = require('prom-client');;
+const collectDefaultMetrics = promClient.collectDefaultMetrics;
+const Registry = promClient.Registry;
+const register = new Registry();
+collectDefaultMetrics({ register });
+
+register.setDefaultLabels({
+  app: 'hello-kubernetes'
+});
+
+const httpRequestTimer = new promClient.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Duration of HTTP requests in seconds',
+  labelNames: ['method', 'path', 'code'],
+  buckets: [0.1, 0.3, 0.5, 0.7, 1, 3, 5, 7, 10] // 0.1 to 10 seconds
+});
+
+register.registerMetric(httpRequestTimer);
+
+app.get('/metrics', async (req, res) => {
+  // Return all metrics the Prometheus exposition format
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+// End of Prometheus metrics
+
+
 // Handler for health checks (without logs)
 app.get('/health', (req, res) => {
   const data = {
@@ -21,7 +49,7 @@ app.get('/health', (req, res) => {
 });
 
 app.use(expressLogger);
-app.engine('hbs', engine({ extname: '.hbs', defaultLayout: "main"}));
+app.engine('hbs', engine({ extname: '.hbs', defaultLayout: "main" }));
 app.set('view engine', 'hbs');
 
 // Configuration
@@ -29,12 +57,12 @@ app.set('view engine', 'hbs');
 var port = process.env.PORT || 8080;
 var message = process.env.MESSAGE || 'Hello Kubernetes!';
 var renderPathPrefix = (
-  process.env.RENDER_PATH_PREFIX ? 
+  process.env.RENDER_PATH_PREFIX ?
     '/' + process.env.RENDER_PATH_PREFIX.replace(/^[\\/]+/, '').replace(/[\\/]+$/, '') :
     ''
 );
 var handlerPathPrefix = (
-  process.env.HANDLER_PATH_PREFIX ? 
+  process.env.HANDLER_PATH_PREFIX ?
     '/' + process.env.HANDLER_PATH_PREFIX.replace(/^[\\/]+/, '').replace(/[\\/]+$/, '') :
     ''
 );
@@ -76,23 +104,66 @@ logger.debug('Serving from base path "' + handlerPathPrefix + '"');
 
 // GET Handler
 app.get(handlerPathPrefix + '/*', function (req, res) {
-    res.render('home', {
-      message: message,
-      namespace: namespace,
-      pod: podName,
-      podIP: podIP,
-      node: nodeName + ' (' + nodeOS + ')',
-      reqProtocol: req.protocol,
-      reqHostname: req.hostname,
-      reqPath: req.path,
-      reqMethod: req.method,
-      container: containerImage + ' (' + containerImageArch + ')',
-      renderPathPrefix: renderPathPrefix
-    });
+  // Start the timer
+  const end = httpRequestTimer.startTimer();
+  res.render('home', {
+    message: message,
+    namespace: namespace,
+    pod: podName,
+    podIP: podIP,
+    node: nodeName + ' (' + nodeOS + ')',
+    reqProtocol: req.protocol,
+    reqHostname: req.hostname,
+    reqPath: req.path,
+    reqMethod: req.method,
+    container: containerImage + ' (' + containerImageArch + ')',
+    renderPathPrefix: renderPathPrefix
+  });
+  // End timer and add labels
+  end({ path: req.path, code: res.statusCode, method: req.method });
+});
+
+// POST Handler /random
+// Random sleep time, random exit code (200 or 504). Useful for metrics samples
+app.post(handlerPathPrefix + '/random', async (req, res) => {
+  // Start the timer
+  const end = httpRequestTimer.startTimer();
+
+  // Random response time, until 6 seconds
+  let rand = Math.round(Math.random() * 6000);
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  await sleep(rand);
+
+  const data = {
+    message: message,
+    namespace: namespace,
+    pod: podName,
+    podIP: podIP,
+    node: nodeName + ' (' + nodeOS + ')',
+    reqProtocol: req.protocol,
+    reqHostname: req.hostname,
+    reqPath: req.path,
+    reqMethod: req.method,
+    container: containerImage + ' (' + containerImageArch + ')',
+  }
+
+  // Return 504 when response > 5s
+  if (rand > 5000) {
+    var responseStatus = 504
+  } else {
+    var responseStatus = 200
+  }
+  res.status(responseStatus).send(data);
+  // End timer and add labels
+  end({ path: req.path, code: res.statusCode, method: req.method });
 });
 
 // POST Handler
 app.post(handlerPathPrefix + '/*', function (req, res) {
+  // Start the timer
+  const end = httpRequestTimer.startTimer();
   const data = {
     message: message,
     namespace: namespace,
@@ -106,6 +177,8 @@ app.post(handlerPathPrefix + '/*', function (req, res) {
     container: containerImage + ' (' + containerImageArch + ')',
   }
   res.status(200).send(data);
+  // End timer and add labels
+  end({ path: req.path, code: res.statusCode, method: req.method });
 });
 
 // Server
